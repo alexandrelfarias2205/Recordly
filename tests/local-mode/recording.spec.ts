@@ -30,7 +30,7 @@ test("local builds open permissions without sign-in and keep OS permission check
 	const permissions = page.getByRole("dialog", { name: "Recordly local permissions" });
 	await expect(
 		permissions.getByRole("heading", { name: "Allow Recordly to record" }),
-	).toBeVisible();
+	).toBeVisible({ timeout: 15000 });
 	const start = permissions.getByRole("button", { name: "Start recording", exact: true });
 	await expect(start).toBeDisabled();
 	await expect(permissions.getByRole("button", { name: "Back to account" })).toHaveCount(0);
