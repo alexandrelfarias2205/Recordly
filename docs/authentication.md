@@ -1,5 +1,11 @@
 # Recordly authentication setup
 
+## Local-only builds
+
+Set `VITE_RECORDLY_LOCAL_ONLY=true` at build time to enable local recording and editing without an account. This is an explicit opt-in; ordinary builds retain the account requirements below. Local builds do not create a Supabase client or a synthetic session, open permissions directly, and still require the real macOS Screen Recording and Accessibility grants. Cloud sharing is disabled in both the renderer and the main-process endpoint validation, even if cloud credentials or an endpoint are present in the build environment. See [macOS local installation](macos-local-installation.md) for building and renewing permissions after a rebuild.
+
+Unit and interface coverage for local mode runs in the Code Quality workflow. All automated tests run on CI runners.
+
 Recordly requires a non-anonymous Supabase Auth session before onboarding can advance to permissions or recording can start. The sign-in dialog uses email magic links and whichever of Google, Microsoft, or GitHub OAuth are enabled in the configured project; there is no guest or local demo login. Sessions persist across app restarts. The desktop application uses PKCE and returns from the system browser through a loopback callback in development and `recordly://auth/callback` in production. The dialog reads `/auth/v1/settings` and shows only enabled OAuth providers. SAML is intentionally hidden until configured.
 
 ## Account and permission settings

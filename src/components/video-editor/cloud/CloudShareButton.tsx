@@ -21,6 +21,7 @@ import { Export, LinkSimple } from "@phosphor-icons/react";
 import { Label } from "@/components/ui/label";
 
 import { CLOUD_SHARE_ENDPOINT as DEFAULT_CLOUD_ENDPOINT } from "./endpoint";
+import { LOCAL_ONLY } from "@/lib/runtimeMode";
 
 type Props = {
 	projectPath?: string | null;
@@ -39,7 +40,18 @@ type Props = {
 	onRequestSignIn?: () => void;
 };
 
-export function CloudShareButton({
+export function CloudShareButton(props: Props) {
+	if (LOCAL_ONLY) {
+		return (
+			<p className="text-xs text-muted">
+				Cloud sharing is disabled in this local-only build.
+			</p>
+		);
+	}
+	return <OnlineCloudShareButton {...props} />;
+}
+
+function OnlineCloudShareButton({
 	projectPath,
 	filePath,
 	projectTitle,

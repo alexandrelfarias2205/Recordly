@@ -1,3 +1,5 @@
+import { LOCAL_ONLY } from "../../src/lib/runtimeMode";
+
 export type CloudShareTicket = {
 	uploadUrl: string;
 	shareUrl: string;
@@ -22,6 +24,7 @@ function parseUrl(value: unknown, label: string): URL {
 }
 
 export function normalizeCloudEndpoint(value: unknown): string {
+	if (LOCAL_ONLY) throw new Error("Cloud sharing is disabled in this local-only build.");
 	if (typeof value !== "string" || value.trim().length === 0) {
 		throw new Error("Enter a cloud share endpoint.");
 	}

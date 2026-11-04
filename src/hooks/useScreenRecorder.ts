@@ -3,7 +3,7 @@ import { fixWebmDuration } from "@fix-webm-duration/fix";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/ui/toast";
 import { getEffectiveRecordingDurationMs } from "@/lib/mediaTiming";
-import { hasRecordlySession } from "@/lib/auth/recordlyAuth";
+import { canStartRecording } from "@/lib/auth/recordlyAuth";
 import {
 	getVideoExtensionForMimeType,
 	isWebmMimeType,
@@ -548,7 +548,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	}, []);
 
 	const preparePermissions = useCallback(async () => {
-		if (!(await hasRecordlySession().catch(() => false))) {
+		if (!(await canStartRecording().catch(() => false))) {
 			await window.electronAPI.showRecordingPermissions();
 			return false;
 		}

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { loadAppSetting, saveAppSetting } from "@/lib/appSettings";
 import { RecordlySignInDialog } from "./RecordlySignInDialog";
+import { Modal } from "@heroui/react";
+import { LOCAL_ONLY } from "@/lib/runtimeMode";
+import { OnboardingPermissions } from "./OnboardingPermissions";
 
 const SEEN_KEY = "recordly.onboarding.v1.seen";
 
@@ -35,7 +38,7 @@ export function OnboardingController({
 
 	useEffect(() => {
 		if (!ready) return;
-		if (!user) {
+		if (!user && !LOCAL_ONLY) {
 			setOpen(true);
 			return;
 		}
@@ -57,11 +60,33 @@ export function OnboardingController({
 	);
 
 	const finish = () => {
-		if (!user) return;
+		if (!user && !LOCAL_ONLY) return;
 		saveAppSetting(SEEN_KEY, true);
 		close();
 		void window.electronAPI.showRecordingHud();
 	};
+
+	if (LOCAL_ONLY) {
+		return (
+			<Modal
+				isOpen={open}
+				onOpenChange={(value) => {
+					if (!value) close();
+				}}
+			>
+				<Modal.Backdrop>
+					<Modal.Container placement="center">
+						<Modal.Dialog
+							aria-label="Recordly local permissions"
+							className="max-w-[640px] rounded-3xl p-0"
+						>
+							<OnboardingPermissions onFinish={finish} />
+						</Modal.Dialog>
+					</Modal.Container>
+				</Modal.Backdrop>
+			</Modal>
+		);
+	}
 
 	return (
 		<RecordlySignInDialog

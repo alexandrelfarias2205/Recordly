@@ -1,4 +1,5 @@
 import { createClient, type Provider, type User } from "@supabase/supabase-js";
+import { LOCAL_ONLY } from "../runtimeMode";
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
 const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim();
@@ -6,7 +7,7 @@ const callbackUrl = import.meta.env.DEV
 	? "http://127.0.0.1:43821/auth/callback"
 	: "recordly://auth/callback";
 
-export const recordlyAuthConfigured = Boolean(supabaseUrl && supabasePublishableKey);
+export const recordlyAuthConfigured = !LOCAL_ONLY && Boolean(supabaseUrl && supabasePublishableKey);
 
 export type RecordlyOAuthProvider = "google" | "azure" | "github";
 
@@ -146,6 +147,10 @@ export async function hasRecordlySession(): Promise<boolean> {
 	if (!recordlyAuth) return false;
 	const { data, error } = await recordlyAuth.auth.getSession();
 	return !error && Boolean(data.session?.user && !data.session.user.is_anonymous);
+}
+
+export async function canStartRecording(): Promise<boolean> {
+	return LOCAL_ONLY || hasRecordlySession();
 }
 
 let lastCallback: { url: string; completion: Promise<void> } | undefined;

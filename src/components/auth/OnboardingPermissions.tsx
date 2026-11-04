@@ -8,7 +8,7 @@ export function OnboardingPermissions({
 	onBack,
 	onFinish,
 }: {
-	onBack: () => void;
+	onBack?: () => void;
 	onFinish: () => void;
 }) {
 	const [platform, setPlatform] = useState<"checking" | "mac" | "other">("checking");
@@ -165,7 +165,7 @@ export function OnboardingPermissions({
 									<p className="flex-1 text-xs leading-relaxed text-muted">
 										{screenGranted && accessibilityGranted
 											? "Your screen is captured only when you start recording. Microphone and camera access are requested when you use them."
-											: "Return after enabling access. macOS may require restarting Recordly."}
+											: "Return after enabling access, then restart Recordly if required. If it is already enabled but still missing here, remove Recordly from System Settings and add the current app again."}
 									</p>
 									{(!screenGranted || !accessibilityGranted) && (
 										<Button
@@ -194,10 +194,12 @@ export function OnboardingPermissions({
 				)}
 			</OnboardingBody>
 			<OnboardingFooter>
-				<Button variant="ghost" aria-label="Back to account" onPress={onBack}>
-					<ArrowLeft size={16} />
-					Back
-				</Button>
+				{onBack && (
+					<Button variant="ghost" aria-label="Back to account" onPress={onBack}>
+						<ArrowLeft size={16} />
+						Back
+					</Button>
+				)}
 				<Button
 					isDisabled={
 						platform === "checking" ||
