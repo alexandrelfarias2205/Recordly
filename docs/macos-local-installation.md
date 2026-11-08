@@ -23,6 +23,33 @@ After installing the intended build:
 
 For distribution across rebuilds, use a consistent Developer ID signing identity and notarization. An installation path alone does not stabilize an ad hoc signature.
 
+## Stable local signing identity
+
+Ad hoc signatures bind the TCC grant to the cdhash of one build, so every local rebuild silently loses Screen Recording, Accessibility, Microphone and Camera. On 2026-11-08 this repeated: the ScreenCapture row for `dev.recordly.app` still required cdhash `84a0c735…` (04/11 build) while the installed app had `0979a842…`, and Recordly kept asking for a permission that System Settings showed as enabled.
+
+Sign local builds with a self-signed certificate instead. Its designated requirement becomes `identifier "dev.recordly.app" and certificate root = H"…"`, which does not change between builds.
+
+1. Create the identity once per machine (macOS asks for the login password to trust it):
+
+   ```sh
+   node scripts/sign-macos-local.mjs --create-identity
+   ```
+
+   This creates "Recordly Local Signing" in the login keychain. Another name can be used through `RECORDLY_MAC_SIGN_IDENTITY`.
+
+2. After `electron-builder --mac --arm64 --dir --publish never`, re-sign the packaged bundle before installing it:
+
+   ```sh
+   npm run sign:mac-local            # signs release/mac-arm64/Recordly.app
+   npm run sign:mac-local -- path/to/Other.app
+   ```
+
+   The script uses `@electron/osx-sign` with the same entitlements as electron-builder (`build/entitlements.mac*.plist`), hardened runtime enabled and no timestamp, then verifies the bundle and refuses to finish if the designated requirement still contains a cdhash.
+
+3. Install to `/Applications/Recordly.app` and grant the permissions one last time: `tccutil reset ScreenCapture dev.recordly.app` (and `Accessibility`, `Microphone`, `Camera`, `AppleEvents` when their rows belong to another build), open the installed app and accept the prompts. Later rebuilds signed with the same identity keep these grants.
+
+The first `codesign` with the new key may show a keychain dialog asking to allow access; choose "Always Allow". The self-signed identity is only for this machine; distribution still needs Developer ID and notarization.
+
 ## Source update history
 
 The local checkout was updated from `49926862` to upstream `109ca3a1` on 2026-11-04. Upstream had rewritten main's history; the old local main was preserved as `backup/pre-update-20261104`. The pre-existing x64 helper modification was preserved in the named Git stash before switching the same normal checkout to the updated base. No worktree is needed.
