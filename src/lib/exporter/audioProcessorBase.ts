@@ -12,6 +12,10 @@ export class AudioProcessorBase {
 	): ArrayBuffer {
 		const bytesPerSample = 2; // 16-bit PCM
 		const dataSize = totalFrames * numChannels * bytesPerSample;
+		if (dataSize > 0xffffffff - 36) {
+			// WAV stores sizes as uint32; larger data would be silently truncated.
+			throw new Error("Edited audio is too long for a WAV file (exceeds 4 GiB)");
+		}
 		const headerSize = 44;
 		const header = new ArrayBuffer(headerSize);
 		const view = new DataView(header);

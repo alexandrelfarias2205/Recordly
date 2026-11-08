@@ -59,6 +59,7 @@ export interface NativeVideoExportFinishOptions {
 	editedTrackStrategy?: NativeVideoExportEditedTrackStrategy;
 	editedTrackSegments?: NativeVideoExportEditedTrackSegment[];
 	editedAudioData?: ArrayBuffer;
+	editedAudioPath?: string | null;
 	editedAudioMimeType?: string | null;
 }
 

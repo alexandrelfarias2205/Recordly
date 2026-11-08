@@ -19,8 +19,10 @@ vi.mock("electron", () => ({
 import {
 	cleanupAllExportStreams,
 	closeExportStream,
+	discardOwnedExportPath,
 	hasExportStream,
 	isOwnedExportPath,
+	removeExportSessionDirIfEmpty,
 	openExportStream,
 	writeToExportStream,
 } from "./exportStream";
@@ -135,5 +137,87 @@ describe("exportStream", () => {
 		await expect(openExportStream({ extension: "MP4" })).rejects.toThrow(
 			/Invalid export stream extension/,
 		);
+	});
+
+	it("rejects close and removes the temp when a write failed", async () => {
+		const { streamId, tempPath } = await openExportStream();
+		openedTempPaths.push(tempPath);
+
+		await expect(writeToExportStream(streamId, -1, new Uint8Array([1]))).rejects.toThrow();
+		await expect(closeExportStream(streamId)).rejects.toThrow();
+
+		expect(hasExportStream(streamId)).toBe(false);
+		expect(isOwnedExportPath(tempPath)).toBe(false);
+		await expect(fs.stat(tempPath)).rejects.toThrow();
+	});
+
+	describe("discardOwnedExportPath", () => {
+		it("removes and releases an owned path", async () => {
+			const { streamId, tempPath } = await openExportStream();
+			openedTempPaths.push(tempPath);
+			await closeExportStream(streamId);
+
+			await discardOwnedExportPath(tempPath);
+
+			expect(isOwnedExportPath(tempPath)).toBe(false);
+			await expect(fs.stat(tempPath)).rejects.toThrow();
+		});
+
+		it("removes the empty session directory along with the file", async () => {
+			const { streamId, tempPath } = await openExportStream();
+			await closeExportStream(streamId);
+
+			await discardOwnedExportPath(tempPath);
+
+			await expect(fs.stat(path.dirname(tempPath))).rejects.toThrow();
+		});
+
+		it("ignores paths that are not owned", async () => {
+			const foreign = path.join(TMP_ROOT, "foreign.wav");
+			await fs.writeFile(foreign, "x");
+			openedTempPaths.push(foreign);
+
+			await discardOwnedExportPath(foreign);
+			await discardOwnedExportPath(undefined);
+			await discardOwnedExportPath(42);
+
+			expect((await fs.stat(foreign)).isFile()).toBe(true);
+		});
+
+		it("does not throw for an owned path that no longer exists", async () => {
+			const { streamId, tempPath } = await openExportStream();
+			await closeExportStream(streamId);
+			await fs.rm(tempPath, { force: true });
+
+			await expect(discardOwnedExportPath(tempPath)).resolves.toBeUndefined();
+			expect(isOwnedExportPath(tempPath)).toBe(false);
+		});
+	});
+
+	describe("removeExportSessionDirIfEmpty", () => {
+		it("keeps a session directory that still has files", async () => {
+			const { streamId, tempPath } = await openExportStream();
+			await closeExportStream(streamId);
+			openedTempPaths.push(tempPath);
+
+			await removeExportSessionDirIfEmpty(tempPath);
+
+			expect((await fs.stat(path.dirname(tempPath))).isDirectory()).toBe(true);
+		});
+
+		it("never removes directories without the export prefix", async () => {
+			const plainDir = path.join(TMP_ROOT, "plain-dir");
+			await fs.mkdir(plainDir, { recursive: true });
+
+			await removeExportSessionDirIfEmpty(path.join(plainDir, "gone.wav"));
+
+			expect((await fs.stat(plainDir)).isDirectory()).toBe(true);
+		});
+
+		it("does not throw when the directory is already gone", async () => {
+			await expect(
+				removeExportSessionDirIfEmpty(path.join(TMP_ROOT, "recordly-export-nope", "x.wav")),
+			).resolves.toBeUndefined();
+		});
 	});
 });

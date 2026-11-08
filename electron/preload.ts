@@ -325,6 +325,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 			editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 			editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 			editedAudioData?: ArrayBuffer;
+			editedAudioPath?: string | null;
 			editedAudioMimeType?: string | null;
 		};
 	}) => {
@@ -405,6 +406,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 			editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 			editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 			editedAudioData?: ArrayBuffer;
+			editedAudioPath?: string | null;
 			editedAudioMimeType?: string | null;
 		},
 	) => {
@@ -453,6 +455,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 			editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 			editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 			editedAudioData?: ArrayBuffer;
+			editedAudioPath?: string | null;
 			editedAudioMimeType?: string | null;
 		},
 	) => {
@@ -475,6 +478,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 			editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 			editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 			editedAudioData?: ArrayBuffer;
+			editedAudioPath?: string | null;
 			editedAudioMimeType?: string | null;
 		},
 	) => {
@@ -601,6 +605,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	},
 	storeRecordedVideo: (videoData: ArrayBuffer, fileName: string) => {
 		return ipcRenderer.invoke("store-recorded-video", videoData, fileName);
+	},
+	storeRecordedVideoFromTemp: (tempPath: string, fileName: string) => {
+		return ipcRenderer.invoke("store-recorded-video-from-temp", tempPath, fileName);
 	},
 	storeMicrophoneSidecar: (
 		audioData: ArrayBuffer,

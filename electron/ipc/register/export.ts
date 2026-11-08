@@ -7,6 +7,7 @@ import type { SaveDialogOptions } from "electron";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import {
 	closeExportStream,
+	discardOwnedExportPath,
 	isOwnedExportPath,
 	openExportStream,
 	registerOwnedExportPath,
@@ -244,6 +245,19 @@ function isTempPathSafe(tempPath: string): boolean {
 	}
 	const withSep = tempRoot.endsWith(path.sep) ? tempRoot : tempRoot + path.sep;
 	return candidate.startsWith(withSep);
+}
+
+const EDITED_AUDIO_PATH_ERROR = "Edited audio path is not an app-managed export temp";
+
+/** Returns an error message when options carry an editedAudioPath that is not an owned temp. */
+function validateEditedAudioPath(options?: NativeVideoExportFinishOptions): string | null {
+	const candidate = options?.editedAudioPath;
+	if (candidate === undefined || candidate === null) {
+		return null;
+	}
+	return typeof candidate === "string" && isOwnedExportPath(candidate)
+		? null
+		: EDITED_AUDIO_PATH_ERROR;
 }
 
 export function registerExportHandlers() {
@@ -651,7 +665,21 @@ export function registerExportHandlers() {
 		async (_, sessionId: string, options?: NativeVideoExportFinishOptions) => {
 			const session = nativeVideoExportSessions.get(sessionId);
 			if (!session) {
+				await discardOwnedExportPath(options?.editedAudioPath);
 				return { success: false, error: "Invalid native export session" };
+			}
+
+			const editedAudioPathError = validateEditedAudioPath(options);
+			if (editedAudioPathError) {
+				flushNativeVideoExportPendingWriteRequests(
+					sessionId,
+					session,
+					editedAudioPathError,
+				);
+				nativeVideoExportSessions.delete(sessionId);
+				await removeTemporaryExportFile(session.outputPath);
+				await discardOwnedExportPath(options?.editedAudioPath);
+				return { success: false, error: editedAudioPathError };
 			}
 
 			try {
@@ -694,6 +722,7 @@ export function registerExportHandlers() {
 				await removeTemporaryExportFile(session.outputPath);
 				const finalizedSuffix = session.outputPath.replace(/\.mp4$/, "-final.mp4");
 				await removeTemporaryExportFile(finalizedSuffix);
+				await discardOwnedExportPath(options?.editedAudioPath);
 				return {
 					success: false,
 					error: String(error),
@@ -706,10 +735,16 @@ export function registerExportHandlers() {
 		"mux-exported-video-audio-from-path",
 		async (_, videoPath: string, options?: NativeVideoExportFinishOptions) => {
 			if (typeof videoPath !== "string" || !isOwnedExportPath(videoPath)) {
+				await discardOwnedExportPath(options?.editedAudioPath);
 				return {
 					success: false,
 					error: "Video path is not an app-managed export temp",
 				};
+			}
+			const editedAudioPathError = validateEditedAudioPath(options);
+			if (editedAudioPathError) {
+				await discardOwnedExportPath(options?.editedAudioPath);
+				return { success: false, error: editedAudioPathError };
 			}
 			try {
 				const finalized = await muxNativeVideoExportAudio(videoPath, options ?? {});
@@ -732,6 +767,7 @@ export function registerExportHandlers() {
 					await removeTemporaryExportFile(videoPath);
 					releaseOwnedExportPath(videoPath);
 				}
+				await discardOwnedExportPath(options?.editedAudioPath);
 				return { success: false, error: String(error) };
 			}
 		},
@@ -740,9 +776,15 @@ export function registerExportHandlers() {
 	ipcMain.handle(
 		"mux-exported-video-audio",
 		async (_, videoData: ArrayBuffer, options?: NativeVideoExportFinishOptions) => {
+			const editedAudioPathError = validateEditedAudioPath(options);
+			if (editedAudioPathError) {
+				await discardOwnedExportPath(options?.editedAudioPath);
+				return { success: false, error: editedAudioPathError };
+			}
 			try {
 				const sizeError = getInMemoryExportTooLargeMessage(videoData.byteLength);
 				if (sizeError) {
+					await discardOwnedExportPath(options?.editedAudioPath);
 					return {
 						success: false,
 						error: sizeError,
@@ -761,6 +803,7 @@ export function registerExportHandlers() {
 					metrics: result.metrics,
 				};
 			} catch (error) {
+				await discardOwnedExportPath(options?.editedAudioPath);
 				return {
 					success: false,
 					error: String(error),

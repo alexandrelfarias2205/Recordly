@@ -36,6 +36,11 @@ import {
 	stopCursorCapture,
 	writeCursorTelemetry,
 } from "../cursor/telemetry";
+import {
+	isOwnedExportPath,
+	releaseOwnedExportPath,
+	removeExportSessionDirIfEmpty,
+} from "../export/exportStream";
 import { getFfmpegBinaryPath } from "../ffmpeg/binary";
 import { getMonitorHandles } from "../monitorResolver";
 import {
@@ -1830,6 +1835,56 @@ export function registerRecordingHandlers(
 			};
 		}
 	});
+
+	// Moves a renderer-streamed temp recording into the recordings dir without IPC byte transfer.
+	ipcMain.handle(
+		"store-recorded-video-from-temp",
+		async (_, tempPath: unknown, fileName: unknown) => {
+			const ownedTempPath =
+				typeof tempPath === "string" && isOwnedExportPath(tempPath) ? tempPath : null;
+			// Set while a cross-device copy is in flight so a partial destination is cleaned up.
+			let partialVideoPath: string | null = null;
+			try {
+				if (!ownedTempPath) {
+					throw new Error("Recording temp path is not an app-managed export temp");
+				}
+				const recordingsDir = await getRecordingsDir();
+				const videoPath = resolveRecordedVideoStoragePath(recordingsDir, fileName);
+				try {
+					await fs.rename(ownedTempPath, videoPath);
+				} catch (renameError) {
+					if ((renameError as NodeJS.ErrnoException).code !== "EXDEV") {
+						throw renameError;
+					}
+					partialVideoPath = videoPath;
+					await fs.copyFile(ownedTempPath, videoPath);
+					partialVideoPath = null;
+					// The copy is complete; a leftover source is removed best-effort below.
+					await fs.unlink(ownedTempPath).catch(() => undefined);
+				}
+				// The temp is created 0600; match the default mode of regular recordings.
+				await fs.chmod(videoPath, 0o644).catch(() => undefined);
+				await removeExportSessionDirIfEmpty(ownedTempPath);
+				releaseOwnedExportPath(ownedTempPath);
+				return await finalizeStoredVideo(videoPath);
+			} catch (error) {
+				console.error("Failed to store video from temp:", error);
+				if (partialVideoPath) {
+					await fs.rm(partialVideoPath, { force: true }).catch(() => undefined);
+				}
+				if (ownedTempPath) {
+					await fs.rm(ownedTempPath, { force: true }).catch(() => undefined);
+					await removeExportSessionDirIfEmpty(ownedTempPath);
+					releaseOwnedExportPath(ownedTempPath);
+				}
+				return {
+					success: false,
+					message: "Failed to store video",
+					error: String(error),
+				};
+			}
+		},
+	);
 
 	ipcMain.handle("get-recorded-video-path", async () => {
 		try {

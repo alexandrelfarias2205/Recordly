@@ -330,6 +330,10 @@ interface Window {
 			videoData: ArrayBuffer,
 			fileName: string,
 		) => Promise<{ success: boolean; path?: string; message?: string }>;
+		storeRecordedVideoFromTemp: (
+			tempPath: string,
+			fileName: string,
+		) => Promise<{ success: boolean; path?: string; message?: string }>;
 		storeMicrophoneSidecar: (
 			audioData: ArrayBuffer,
 			videoPath: string,
@@ -462,6 +466,7 @@ interface Window {
 				editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 				editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 				editedAudioData?: ArrayBuffer;
+				editedAudioPath?: string | null;
 				editedAudioMimeType?: string | null;
 			};
 		}) => Promise<{
@@ -510,6 +515,7 @@ interface Window {
 				editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 				editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 				editedAudioData?: ArrayBuffer;
+				editedAudioPath?: string | null;
 				editedAudioMimeType?: string | null;
 			},
 		) => Promise<{
@@ -534,6 +540,7 @@ interface Window {
 				editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 				editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 				editedAudioData?: ArrayBuffer;
+				editedAudioPath?: string | null;
 				editedAudioMimeType?: string | null;
 			},
 		) => Promise<{
@@ -554,6 +561,7 @@ interface Window {
 				editedTrackStrategy?: "filtergraph-fast-path" | "offline-render-fallback";
 				editedTrackSegments?: Array<{ startMs: number; endMs: number; speed: number }>;
 				editedAudioData?: ArrayBuffer;
+				editedAudioPath?: string | null;
 				editedAudioMimeType?: string | null;
 			},
 		) => Promise<{

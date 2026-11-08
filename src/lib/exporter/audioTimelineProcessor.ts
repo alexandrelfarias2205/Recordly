@@ -1,5 +1,6 @@
 import type { SpeedRegion } from "@/components/video-editor/types";
 import { AudioProcessorBase } from "./audioProcessorBase";
+import type { PcmSource } from "./pcmSource";
 import type { TimelineSlice, TrimLikeRegion } from "./audioProcessorShared";
 
 export class AudioTimelineProcessor extends AudioProcessorBase {
@@ -75,7 +76,7 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 	// provided, only sources overlapping the chunk window are scheduled.
 	protected scheduleBufferThroughTimeline(
 		ctx: OfflineAudioContext,
-		buffer: AudioBuffer,
+		buffer: PcmSource,
 		slices: TimelineSlice[],
 		sourceStartDelaySec: number,
 		gain = 1,
@@ -211,7 +212,7 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 	}
 
 	protected stretchAudioBuffer(
-		originalBuffer: AudioBuffer,
+		originalBuffer: PcmSource,
 		speed: number,
 		sourceOffsetSec: number,
 		sourceDurationSec: number,
@@ -236,11 +237,10 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 			const copyLength = Math.min(endSample - startSample, outSamples);
 			if (copyLength > 0) {
 				for (let c = 0; c < channels; c++) {
-					outBuffer.copyToChannel(
-						originalBuffer
-							.getChannelData(c)
-							.subarray(startSample, startSample + copyLength),
+					originalBuffer.copyFromChannel(
+						outBuffer.getChannelData(c).subarray(0, copyLength),
 						c,
+						startSample,
 					);
 				}
 			}
@@ -268,9 +268,12 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 		const workOutSamples = Math.floor((workEndIn - workStartIn) / speed) + windowSize * 2;
 		const workOutBuffer = ctx.createBuffer(channels, workOutSamples, sampleRate);
 
-		const inDataByChannel = Array.from({ length: channels }, (_, c) =>
-			originalBuffer.getChannelData(c),
-		);
+		// Only the WSOLA window is materialized; inData indices are relative to workStartIn.
+		const inDataByChannel = Array.from({ length: channels }, (_, c) => {
+			const windowData = new Float32Array(Math.max(0, workEndIn - workStartIn));
+			originalBuffer.copyFromChannel(windowData, c, workStartIn);
+			return windowData;
+		});
 		const workOutDataByChannel = Array.from({ length: channels }, (_, c) =>
 			workOutBuffer.getChannelData(c),
 		);
@@ -288,7 +291,7 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 			if (inOffset + i < workEndIn && outOffset + i < workOutSamples) {
 				for (let c = 0; c < channels; c++) {
 					workOutDataByChannel[c][outOffset + i] +=
-						inDataByChannel[c][inOffset + i] * window[i];
+						inDataByChannel[c][inOffset + i - workStartIn] * window[i];
 				}
 			}
 		}
@@ -312,7 +315,7 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 							for (let c = 0; c < channels; c++) {
 								corr +=
 									workOutDataByChannel[c][outOffset + i] *
-									inDataByChannel[c][testOffset + i];
+									inDataByChannel[c][testOffset + i - workStartIn];
 							}
 						}
 					}
@@ -328,7 +331,7 @@ export class AudioTimelineProcessor extends AudioProcessorBase {
 				if (bestOffset + i < workEndIn && outOffset + i < workOutSamples) {
 					for (let c = 0; c < channels; c++) {
 						workOutDataByChannel[c][outOffset + i] +=
-							inDataByChannel[c][bestOffset + i] * window[i];
+							inDataByChannel[c][bestOffset + i - workStartIn] * window[i];
 					}
 				}
 			}

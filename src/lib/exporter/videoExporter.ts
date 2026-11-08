@@ -19,6 +19,11 @@ import type {
 } from "@/components/video-editor/types";
 import { getEffectiveVideoStreamDurationSeconds } from "@/lib/mediaTiming";
 import { AudioProcessor, isAacAudioEncodingSupported } from "./audioEncoder";
+import {
+	PendingEditedAudioTemp,
+	type RenderedEditedAudio,
+	renderEditedAudioForMux,
+} from "./editedAudioSink";
 import { buildEditedTrackSourceSegments, classifyEditedTrackStrategy } from "./editedTrackStrategy";
 import {
 	advanceFinalizationProgress,
@@ -140,6 +145,8 @@ export class VideoExporter {
 	private encoder: VideoEncoder | null = null;
 	private muxer: VideoMuxer | null = null;
 	private audioProcessor: AudioProcessor | null = null;
+	// Edited-audio WAV on disk awaiting the native/FFmpeg mux (main removes it after muxing).
+	private readonly pendingEditedAudioTemp = new PendingEditedAudioTemp();
 	private cancelled = false;
 	private encodeQueue = 0;
 	private videoDescription: Uint8Array | undefined;
@@ -849,6 +856,38 @@ export class VideoExporter {
 		frame.close();
 	}
 
+	private async renderEditedAudioForNativeMux(
+		description: string,
+		totalFrames: number,
+	): Promise<RenderedEditedAudio> {
+		this.pendingEditedAudioTemp.discard();
+		// A timed-out render keeps running and would close a stream nobody tracks.
+		this.audioProcessor?.cancel();
+		const processor = new AudioProcessor();
+		this.audioProcessor = processor;
+		processor.setOnProgress((progress) => {
+			this.reportFinalizingProgress(totalFrames, 99, progress);
+		});
+		return renderEditedAudioForMux({
+			processor,
+			renderArgs: [
+				this.config.videoUrl,
+				this.config.trimRegions,
+				this.config.speedRegions,
+				this.config.audioRegions,
+				this.config.sourceAudioFallbackPaths,
+				this.config.sourceAudioFallbackStartDelayMsByPath,
+				this.config.sourceAudioTrackSettings,
+				this.config.clipRegions,
+			],
+			pendingTemp: this.pendingEditedAudioTemp,
+			runStage: (task) =>
+				this.measureFinalizationStage("editedAudioRenderMs", async () =>
+					this.awaitWithFinalizationTimeout(task(), description, "audio", true),
+				),
+		});
+	}
+
 	private async finishNativeVideoExport(
 		audioPlan: NativeAudioPlan,
 		totalFrames: number,
@@ -858,35 +897,20 @@ export class VideoExporter {
 		}
 
 		let editedAudioBuffer: ArrayBuffer | undefined;
+		let editedAudioPath: string | undefined;
 		let editedAudioMimeType: string | null = null;
 
 		if (
 			audioPlan.audioMode === "edited-track" &&
 			audioPlan.strategy === "offline-render-fallback"
 		) {
-			this.audioProcessor = new AudioProcessor();
-			this.audioProcessor.setOnProgress((progress) => {
-				this.reportFinalizingProgress(totalFrames, 99, progress);
-			});
-			const audioBlob = await this.measureFinalizationStage("editedAudioRenderMs", async () =>
-				this.awaitWithFinalizationTimeout(
-					this.audioProcessor!.renderEditedAudioTrack(
-						this.config.videoUrl,
-						this.config.trimRegions,
-						this.config.speedRegions,
-						this.config.audioRegions,
-						this.config.sourceAudioFallbackPaths,
-						this.config.sourceAudioFallbackStartDelayMsByPath,
-						this.config.sourceAudioTrackSettings,
-						this.config.clipRegions,
-					),
-					"native edited audio rendering",
-					"audio",
-					true,
-				),
+			const renderedAudio = await this.renderEditedAudioForNativeMux(
+				"native edited audio rendering",
+				totalFrames,
 			);
-			editedAudioBuffer = await audioBlob.arrayBuffer();
-			editedAudioMimeType = audioBlob.type || null;
+			editedAudioBuffer = renderedAudio.editedAudioData;
+			editedAudioPath = renderedAudio.editedAudioPath;
+			editedAudioMimeType = renderedAudio.editedAudioMimeType;
 		}
 
 		const sessionId = this.nativeExportSessionId;
@@ -918,12 +942,14 @@ export class VideoExporter {
 							? audioPlan.audioSourceSampleRate
 							: undefined,
 					editedAudioData: editedAudioBuffer,
+					editedAudioPath,
 					editedAudioMimeType,
 				}),
 				"native export finalization",
 				audioPlan.audioMode === "none" ? "default" : "audio",
 			),
 		);
+		this.pendingEditedAudioTemp.settle(result.success);
 		if (result.metrics) {
 			this.finalizationStageMs.ffmpegAudioMuxBreakdown = result.metrics;
 		}
@@ -956,35 +982,20 @@ export class VideoExporter {
 		}
 
 		let editedAudioBuffer: ArrayBuffer | undefined;
+		let editedAudioPath: string | undefined;
 		let editedAudioMimeType: string | null = null;
 
 		if (
 			audioPlan.audioMode === "edited-track" &&
 			audioPlan.strategy === "offline-render-fallback"
 		) {
-			this.audioProcessor = new AudioProcessor();
-			this.audioProcessor.setOnProgress((progress) => {
-				this.reportFinalizingProgress(totalFrames, 99, progress);
-			});
-			const audioBlob = await this.measureFinalizationStage("editedAudioRenderMs", async () =>
-				this.awaitWithFinalizationTimeout(
-					this.audioProcessor!.renderEditedAudioTrack(
-						this.config.videoUrl,
-						this.config.trimRegions,
-						this.config.speedRegions,
-						this.config.audioRegions,
-						this.config.sourceAudioFallbackPaths,
-						this.config.sourceAudioFallbackStartDelayMsByPath,
-						this.config.sourceAudioTrackSettings,
-						this.config.clipRegions,
-					),
-					"ffmpeg edited audio rendering",
-					"audio",
-					true,
-				),
+			const renderedAudio = await this.renderEditedAudioForNativeMux(
+				"ffmpeg edited audio rendering",
+				totalFrames,
 			);
-			editedAudioBuffer = await audioBlob.arrayBuffer();
-			editedAudioMimeType = audioBlob.type || null;
+			editedAudioBuffer = renderedAudio.editedAudioData;
+			editedAudioPath = renderedAudio.editedAudioPath;
+			editedAudioMimeType = renderedAudio.editedAudioMimeType;
 		}
 
 		const muxOptions = {
@@ -1012,6 +1023,7 @@ export class VideoExporter {
 					: undefined,
 			outputDurationSec: this.effectiveDurationSec,
 			editedAudioData: editedAudioBuffer,
+			editedAudioPath,
 			editedAudioMimeType,
 		};
 
@@ -1032,6 +1044,7 @@ export class VideoExporter {
 					"audio",
 				),
 			);
+			this.pendingEditedAudioTemp.settle(result.success);
 			if (result.metrics) {
 				this.finalizationStageMs.ffmpegAudioMuxBreakdown = result.metrics;
 			}
@@ -1058,6 +1071,7 @@ export class VideoExporter {
 				"audio",
 			),
 		);
+		this.pendingEditedAudioTemp.settle(result.success);
 		if (result.metrics) {
 			this.finalizationStageMs.ffmpegAudioMuxBreakdown = result.metrics;
 		}
@@ -1438,6 +1452,7 @@ export class VideoExporter {
 		this.muxer = null;
 		this.audioProcessor?.cancel();
 		this.audioProcessor = null;
+		this.pendingEditedAudioTemp.discard();
 		this.activeFinalizationProgressWatchdog = null;
 		this.lastFinalizationRenderProgress =
 			INITIAL_FINALIZATION_PROGRESS_STATE.lastRenderProgress;

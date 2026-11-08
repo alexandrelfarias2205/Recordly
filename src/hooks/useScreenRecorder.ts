@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/ui/toast";
 import { getEffectiveRecordingDurationMs } from "@/lib/mediaTiming";
 import { canStartRecording } from "@/lib/auth/recordlyAuth";
+import { storeRecordedBlob } from "@/lib/recordingBlobStorage";
 import {
 	getVideoExtensionForMimeType,
 	isWebmMimeType,
@@ -1060,11 +1061,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					const finalBlob = isWebmMimeType(webcamMimeType)
 						? await fixWebmDuration(webcamBlob, duration)
 						: webcamBlob;
-					const arrayBuffer = await finalBlob.arrayBuffer();
-					const result = await window.electronAPI.storeRecordedVideo(
-						arrayBuffer,
-						webcamFileName,
-					);
+					const result = await storeRecordedBlob(finalBlob, webcamFileName);
 					webcamStopResolver.current?.(result.success ? (result.path ?? null) : null);
 				} catch (error) {
 					console.error("Error saving webcam recording:", error);
@@ -2161,11 +2158,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					const videoBlob = isWebmMimeType(recordingBlobType)
 						? await fixWebmDuration(buggyBlob, duration)
 						: buggyBlob;
-					const arrayBuffer = await videoBlob.arrayBuffer();
-					const videoResult = await window.electronAPI.storeRecordedVideo(
-						arrayBuffer,
-						videoFileName,
-					);
+					const videoResult = await storeRecordedBlob(videoBlob, videoFileName);
 					if (!videoResult.success) {
 						console.error("Failed to store video:", videoResult.message);
 						await notifyRecordingFinalizationFailure(

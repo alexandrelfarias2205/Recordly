@@ -13,6 +13,9 @@ type ExportStreamSession = {
 	highestWatermark: number;
 	writeQueue: Promise<void>;
 	aborted: boolean;
+	// First write failure, surfaced again on a non-abort close.
+	writeError: unknown;
+	hasWriteError: boolean;
 };
 
 const exportStreamSessions = new Map<string, ExportStreamSession>();
@@ -83,6 +86,8 @@ export async function openExportStream(options?: { extension?: string }): Promis
 		highestWatermark: 0,
 		writeQueue: Promise.resolve(),
 		aborted: false,
+		writeError: undefined,
+		hasWriteError: false,
 	});
 	registerOwnedExportPath(tempPath);
 
@@ -111,8 +116,29 @@ export async function writeToExportStream(
 			return;
 		}
 		const buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-		await session.fileHandle.write(buffer, 0, buffer.byteLength, position);
-		session.bytesWritten += buffer.byteLength;
+		// fileHandle.write may be short (e.g. disk full); loop until everything lands.
+		let written = 0;
+		try {
+			while (written < buffer.byteLength) {
+				const result = await session.fileHandle.write(
+					buffer,
+					written,
+					buffer.byteLength - written,
+					position + written,
+				);
+				if (result.bytesWritten <= 0) {
+					throw new Error("Export stream write made no progress (disk full?)");
+				}
+				written += result.bytesWritten;
+				session.bytesWritten += result.bytesWritten;
+			}
+		} catch (error) {
+			if (!session.hasWriteError) {
+				session.hasWriteError = true;
+				session.writeError = error;
+			}
+			throw error;
+		}
 		const end = position + buffer.byteLength;
 		if (end > session.highestWatermark) {
 			session.highestWatermark = end;
@@ -136,21 +162,22 @@ export async function closeExportStream(
 		session.aborted = true;
 	}
 
-	try {
-		await session.writeQueue;
-	} catch {
-		// Propagated to the in-flight write promise; closure proceeds regardless.
-	}
+	await session.writeQueue.catch(() => undefined);
 
+	let closeError: unknown;
+	let closeFailed = false;
 	try {
 		await session.fileHandle.close();
-	} catch {
-		// File handle may already be closed; ignore so abort paths stay best-effort.
+	} catch (error) {
+		// Ignored on abort so cleanup stays best-effort; fatal on a normal close.
+		closeFailed = true;
+		closeError = error;
 	}
 
 	exportStreamSessions.delete(streamId);
 
-	if (abort) {
+	const failed = !abort && (session.hasWriteError || closeFailed);
+	if (abort || failed) {
 		releaseOwnedExportPath(session.tempPath);
 		try {
 			await fsp.rm(session.tempPath, { force: true });
@@ -162,6 +189,9 @@ export async function closeExportStream(
 		} catch {
 			// ignore
 		}
+		if (failed) {
+			throw session.hasWriteError ? session.writeError : closeError;
+		}
 		// Aborted streams return `tempPath: null` so callers cannot accidentally
 		// reuse a path that no longer references a file on disk (or, worse, a
 		// path a later session may recycle).
@@ -172,6 +202,33 @@ export async function closeExportStream(
 		tempPath: session.tempPath,
 		bytesWritten: session.highestWatermark,
 	};
+}
+
+/** Best-effort removal of the per-export session dir once its file is gone. */
+export async function removeExportSessionDirIfEmpty(filePath: string): Promise<void> {
+	try {
+		const dir = path.dirname(filePath);
+		if (path.basename(dir).startsWith(SESSION_DIR_PREFIX)) {
+			// rmdir fails on non-empty dirs, which is the desired guard.
+			await fsp.rmdir(dir);
+		}
+	} catch {
+		// Directory may be gone, non-empty, or the fs may not support it.
+	}
+}
+
+/** Removes and releases an owned export temp. Ignores non-owned input and never throws. */
+export async function discardOwnedExportPath(candidate: unknown): Promise<void> {
+	if (typeof candidate !== "string" || !isOwnedExportPath(candidate)) {
+		return;
+	}
+	try {
+		await fsp.rm(candidate, { force: true });
+	} catch {
+		// Best-effort cleanup.
+	}
+	await removeExportSessionDirIfEmpty(candidate);
+	releaseOwnedExportPath(candidate);
 }
 
 export function hasExportStream(streamId: string): boolean {

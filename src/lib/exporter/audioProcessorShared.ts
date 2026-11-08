@@ -6,6 +6,8 @@ import type {
 	TrimRegion,
 } from "@/components/video-editor/types";
 
+import type { PcmSource } from "./pcmSource";
+
 export type SourceTrackId = "mic" | "system" | "mixed";
 
 export const AUDIO_BITRATE = 128_000;
@@ -115,9 +117,9 @@ export interface TimelineSlice {
 
 export interface PreparedOfflineRender {
 	usesClipTimeline?: boolean;
-	mainBufferEntry: { buffer: AudioBuffer; gain: number } | null;
-	companionEntries: Array<{ buffer: AudioBuffer; startDelaySec: number; gain: number }>;
-	regionEntries: Array<{ buffer: AudioBuffer; region: AudioRegion }>;
+	mainBufferEntry: { buffer: PcmSource; gain: number } | null;
+	companionEntries: Array<{ buffer: PcmSource; startDelaySec: number; gain: number }>;
+	regionEntries: Array<{ buffer: PcmSource; region: AudioRegion }>;
 	mutedSourceOutputRangesSec: Array<{ startSec: number; endSec: number }>;
 	slices: TimelineSlice[];
 	outputDurationMs: number;

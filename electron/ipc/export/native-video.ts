@@ -17,6 +17,11 @@ import { promisify } from "node:util";
 import type { WebContents } from "electron";
 import { app, powerSaveBlocker } from "electron";
 import { getFfmpegBinaryPath, getFfprobeBinaryPath } from "../ffmpeg/binary";
+import {
+	isOwnedExportPath,
+	releaseOwnedExportPath,
+	removeExportSessionDirIfEmpty,
+} from "./exportStream";
 import type {
 	NativeExportEncodingMode,
 	NativeStaticLayoutBackend,
@@ -1353,6 +1358,7 @@ export async function removeTemporaryExportFile(filePath: string | null | undefi
 	} catch {
 		// Ignore cleanup failures for temp export artifacts.
 	}
+	await removeExportSessionDirIfEmpty(filePath);
 }
 
 export function getNativeVideoExportSessionError(
@@ -4079,25 +4085,45 @@ export async function muxNativeVideoExportAudio(
 	const ffmpegPath = getFfmpegBinaryPath();
 	const metrics: NativeVideoAudioMuxMetrics = {};
 	const tempArtifacts: string[] = [];
+	let ownedEditedAudioPath: string | null = null;
 	let audioInputPath = options.audioSourcePath ?? null;
 	const useEditedTrackFiltergraph =
 		audioMode === "edited-track" && options.editedTrackStrategy === "filtergraph-fast-path";
 
 	if (audioMode === "edited-track" && !useEditedTrackFiltergraph) {
-		if (!options.editedAudioData) {
-			throw new Error("Edited audio data is missing for native export");
-		}
+		const editedAudioPath =
+			typeof options.editedAudioPath === "string" && options.editedAudioPath.length > 0
+				? options.editedAudioPath
+				: null;
+		if (editedAudioPath) {
+			if (!isOwnedExportPath(editedAudioPath)) {
+				throw new Error("Edited audio path is not an app-managed export temp");
+			}
+			// Streamed to disk by the renderer; use it directly without crossing IPC.
+			audioInputPath = editedAudioPath;
+			ownedEditedAudioPath = editedAudioPath;
+			tempArtifacts.push(editedAudioPath);
+			try {
+				metrics.tempEditedAudioBytes = (await fs.stat(editedAudioPath)).size;
+			} catch {
+				// Size is informational only.
+			}
+		} else {
+			if (!options.editedAudioData) {
+				throw new Error("Edited audio data is missing for native export");
+			}
 
-		const extension = getEditedAudioExtension(options.editedAudioMimeType);
-		audioInputPath = path.join(
-			app.getPath("temp"),
-			`recordly-export-audio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension}`,
-		);
-		const tempAudioWriteStartedAt = getNowMs();
-		await fs.writeFile(audioInputPath, Buffer.from(options.editedAudioData));
-		metrics.tempEditedAudioWriteMs = getNowMs() - tempAudioWriteStartedAt;
-		metrics.tempEditedAudioBytes = options.editedAudioData.byteLength;
-		tempArtifacts.push(audioInputPath);
+			const extension = getEditedAudioExtension(options.editedAudioMimeType);
+			audioInputPath = path.join(
+				app.getPath("temp"),
+				`recordly-export-audio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension}`,
+			);
+			const tempAudioWriteStartedAt = getNowMs();
+			await fs.writeFile(audioInputPath, Buffer.from(options.editedAudioData));
+			metrics.tempEditedAudioWriteMs = getNowMs() - tempAudioWriteStartedAt;
+			metrics.tempEditedAudioBytes = options.editedAudioData.byteLength;
+			tempArtifacts.push(audioInputPath);
+		}
 	}
 
 	if (!audioInputPath) {
@@ -4112,15 +4138,14 @@ export async function muxNativeVideoExportAudio(
 		`${path.basename(videoPath, path.extname(videoPath))}-final.mp4`,
 	);
 
-	const args = buildNativeVideoAudioMuxArgs(
-		videoPath,
-		audioInputPath,
-		outputPath,
-		options,
-		onProgress ? { progressPipe: 2 } : {},
-	);
-
 	try {
+		const args = buildNativeVideoAudioMuxArgs(
+			videoPath,
+			audioInputPath,
+			outputPath,
+			options,
+			onProgress ? { progressPipe: 2 } : {},
+		);
 		const ffmpegExecStartedAt = getNowMs();
 		await runFfmpegAudioMux(ffmpegPath, args, 15 * 60 * 1000, options, onProgress, session);
 		metrics.ffmpegExecMs = getNowMs() - ffmpegExecStartedAt;
@@ -4139,6 +4164,9 @@ export async function muxNativeVideoExportAudio(
 		await Promise.allSettled(
 			tempArtifacts.map((artifactPath) => removeTemporaryExportFile(artifactPath)),
 		);
+		if (ownedEditedAudioPath) {
+			releaseOwnedExportPath(ownedEditedAudioPath);
+		}
 	}
 }
 

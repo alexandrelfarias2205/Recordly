@@ -49,6 +49,11 @@ import {
 } from "@/lib/wallpapers";
 import { AudioProcessor, isAacAudioEncodingSupported } from "./audioEncoder";
 import {
+	PendingEditedAudioTemp,
+	type RenderedEditedAudio,
+	renderEditedAudioForMux,
+} from "./editedAudioSink";
+import {
 	getDefaultLightningRenderBackend,
 	normalizeLightningRuntimePlatform,
 	shouldPreferNativeAutoBackend,
@@ -317,6 +322,8 @@ export class ModernVideoExporter {
 	private encoder: VideoEncoder | null = null;
 	private muxer: VideoMuxer | null = null;
 	private audioProcessor: AudioProcessor | null = null;
+	// Edited-audio WAV on disk awaiting the native/FFmpeg mux (main removes it after muxing).
+	private readonly pendingEditedAudioTemp = new PendingEditedAudioTemp();
 	private cancelled = false;
 	private encodeQueue = 0;
 	private webCodecsEncodeQueueLimit = 0;
@@ -2137,34 +2144,33 @@ export class ModernVideoExporter {
 		description: string,
 		onProgress: (progress: number) => void,
 		sourceAudioFallbackPaths = this.config.sourceAudioFallbackPaths,
-	) {
-		this.audioProcessor = new AudioProcessor();
-		this.audioProcessor.setOnProgress(onProgress);
-		const audioBlob = await this.measureFinalizationStage("editedAudioRenderMs", async () =>
-			this.awaitWithFinalizationTimeout(
-				this.audioProcessor!.renderEditedAudioTrack(
-					this.config.videoUrl,
-					this.config.trimRegions,
-					this.config.speedRegions,
-					this.config.audioRegions,
-					sourceAudioFallbackPaths,
-					this.config.sourceAudioFallbackStartDelayMsByPath,
-					this.config.sourceAudioTrackSettings,
-					this.config.clipRegions,
+	): Promise<RenderedEditedAudio> {
+		// A previous attempt (e.g. a skipped static-layout export) may have left a temp behind.
+		this.pendingEditedAudioTemp.discard();
+		// A timed-out render keeps running and would close a stream nobody tracks.
+		this.audioProcessor?.cancel();
+		const processor = new AudioProcessor();
+		this.audioProcessor = processor;
+		processor.setOnProgress(onProgress);
+		return renderEditedAudioForMux({
+			processor,
+			renderArgs: [
+				this.config.videoUrl,
+				this.config.trimRegions,
+				this.config.speedRegions,
+				this.config.audioRegions,
+				sourceAudioFallbackPaths,
+				this.config.sourceAudioFallbackStartDelayMsByPath,
+				this.config.sourceAudioTrackSettings,
+				this.config.clipRegions,
+			],
+			pendingTemp: this.pendingEditedAudioTemp,
+			runStage: (task) =>
+				this.measureFinalizationStage("editedAudioRenderMs", async () =>
+					this.awaitWithFinalizationTimeout(task(), description, "audio", true),
 				),
-				description,
-				"audio",
-				true,
-			),
-		);
-
-		this.throwIfCancelled();
-		const editedAudioData = await audioBlob.arrayBuffer();
-		this.throwIfCancelled();
-		return {
-			editedAudioData,
-			editedAudioMimeType: audioBlob.type || null,
-		};
+			throwIfCancelled: () => this.throwIfCancelled(),
+		});
 	}
 
 	private throwIfCancelled(): void {
@@ -2706,6 +2712,7 @@ export class ModernVideoExporter {
 				return null;
 			}
 
+			this.pendingEditedAudioTemp.release();
 			const elapsedMs = this.getNowMs() - startedAt;
 			this.encoderName = result.encoderName ?? "static-layout-h264-nvenc";
 			this.nativeStaticLayoutAverageFps = null;
@@ -2948,6 +2955,7 @@ export class ModernVideoExporter {
 		}
 
 		let editedAudioBuffer: ArrayBuffer | undefined;
+		let editedAudioPath: string | undefined;
 		let editedAudioMimeType: string | null = null;
 
 		if (
@@ -2960,6 +2968,7 @@ export class ModernVideoExporter {
 				audioPlan.sourceAudioFallbackPaths,
 			);
 			editedAudioBuffer = renderedAudio.editedAudioData;
+			editedAudioPath = renderedAudio.editedAudioPath;
 			editedAudioMimeType = renderedAudio.editedAudioMimeType;
 		}
 
@@ -3003,12 +3012,14 @@ export class ModernVideoExporter {
 							? audioPlan.audioSourceSampleRate
 							: undefined,
 					editedAudioData: editedAudioBuffer,
+					editedAudioPath,
 					editedAudioMimeType,
 				}),
 				`${NATIVE_EXPORT_ENGINE_NAME} export finalization`,
 				audioPlan.audioMode === "none" ? "default" : "audio",
 			),
 		);
+		this.pendingEditedAudioTemp.settle(result.success);
 		if (result.metrics) {
 			this.finalizationStageMs.ffmpegAudioMuxBreakdown = result.metrics;
 		}
@@ -3047,6 +3058,7 @@ export class ModernVideoExporter {
 		}
 
 		let editedAudioBuffer: ArrayBuffer | undefined;
+		let editedAudioPath: string | undefined;
 		let editedAudioMimeType: string | null = null;
 
 		if (
@@ -3059,6 +3071,7 @@ export class ModernVideoExporter {
 				audioPlan.sourceAudioFallbackPaths,
 			);
 			editedAudioBuffer = renderedAudio.editedAudioData;
+			editedAudioPath = renderedAudio.editedAudioPath;
 			editedAudioMimeType = renderedAudio.editedAudioMimeType;
 		}
 
@@ -3088,6 +3101,7 @@ export class ModernVideoExporter {
 					: undefined,
 			outputDurationSec: this.effectiveDurationSec,
 			editedAudioData: editedAudioBuffer,
+			editedAudioPath,
 			editedAudioMimeType,
 		};
 
@@ -3108,6 +3122,7 @@ export class ModernVideoExporter {
 					"audio",
 				),
 			);
+			this.pendingEditedAudioTemp.settle(result.success);
 			if (result.metrics) {
 				this.finalizationStageMs.ffmpegAudioMuxBreakdown = result.metrics;
 			}
@@ -3135,6 +3150,7 @@ export class ModernVideoExporter {
 				"audio",
 			),
 		);
+		this.pendingEditedAudioTemp.settle(result.success);
 		if (result.metrics) {
 			this.finalizationStageMs.ffmpegAudioMuxBreakdown = result.metrics;
 		}
@@ -3756,6 +3772,7 @@ export class ModernVideoExporter {
 		this.muxer = null;
 		this.audioProcessor?.cancel();
 		this.audioProcessor = null;
+		this.pendingEditedAudioTemp.discard();
 		this.disposeNativeH264Encoder();
 		const nativeExportSessionId = this.nativeExportSessionId;
 		this.nativeExportSessionId = null;

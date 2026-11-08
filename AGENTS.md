@@ -6,3 +6,4 @@
 - Reuse `OnboardingPermissions` and `canStartRecording` for permission and account decisions; cloud IPC handlers must continue to validate endpoints through `normalizeCloudEndpoint`.
 - A checked macOS TCC row can refer to a prior ad hoc signed build. Compare code requirements before changing permission logic; preserve OS checks and renew only the affected app's grant after installation. See `docs/macos-local-installation.md`.
 - Record durable findings and session outcomes in the canonical Obsidian vault. Do not duplicate global agent/model profiles in this repository.
+- Never move media-sized buffers (anything proportional to recording duration) through `ipcRenderer.invoke`; stream them with the `export-stream-*` IPC and pass owned temp paths validated with `isOwnedExportPath`. Decoded audio is consumed as `PcmSource`, never as a whole-track `AudioBuffer`. See `docs/large-recording-export.md`.

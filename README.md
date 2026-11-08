@@ -334,6 +334,7 @@ Recordly combines a platform-specific capture layer with a renderer-driven edito
 
 **Export**
 - The same scene logic used in preview is rendered into exported MP4 or GIF output
+- Video, edited audio and recordings are streamed to disk in 16 MiB chunks so renderer memory stays bounded on long recordings (see `docs/large-recording-export.md`)
 
 **Projects**
 - `.recordly` files store the source media path plus editor state so work can be reopened later

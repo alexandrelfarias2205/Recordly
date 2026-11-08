@@ -1,3 +1,8 @@
+import {
+	EXPORT_STREAM_CHUNK_BYTES,
+	isExportStreamApiAvailable,
+} from "@/lib/exporter/exportStreamIpc";
+
 export interface PendingExportSave {
 	fileName: string;
 	arrayBuffer?: ArrayBuffer;
@@ -12,18 +17,17 @@ export interface PendingExportSave {
 	};
 }
 
-const EXPORT_BLOB_STREAM_CHUNK_BYTES = 16 * 1024 * 1024;
+/** Lowercase extension accepted by the export-stream IPC allowlist, or "bin". */
+export function getFileExtension(fileName: string): string {
+	const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
+	return /^[a-z0-9]{1,8}$/.test(extension) ? extension : "bin";
+}
 
 export async function streamExportBlobToTempFile(
 	blob: Blob,
 	extension: string,
 ): Promise<string | null> {
-	if (
-		typeof window === "undefined" ||
-		!window.electronAPI?.openExportStream ||
-		!window.electronAPI?.writeExportStreamChunk ||
-		!window.electronAPI?.closeExportStream
-	) {
+	if (!isExportStreamApiAvailable()) {
 		return null;
 	}
 
@@ -36,7 +40,7 @@ export async function streamExportBlobToTempFile(
 	let position = 0;
 	try {
 		while (position < blob.size) {
-			const chunk = blob.slice(position, position + EXPORT_BLOB_STREAM_CHUNK_BYTES);
+			const chunk = blob.slice(position, position + EXPORT_STREAM_CHUNK_BYTES);
 			const chunkBuffer = await chunk.arrayBuffer();
 			const writeResult = await window.electronAPI.writeExportStreamChunk(
 				streamId,
@@ -70,12 +74,8 @@ export async function saveExportBlob(
 	outputPath: string | null = null,
 	captionSidecar?: PendingExportSave["captionSidecar"],
 ) {
-	const extension = fileName.split(".").pop()?.toLowerCase() || "bin";
-	const hasExportStreamApi =
-		typeof window !== "undefined" &&
-		typeof window.electronAPI?.openExportStream === "function" &&
-		typeof window.electronAPI?.writeExportStreamChunk === "function" &&
-		typeof window.electronAPI?.closeExportStream === "function";
+	const extension = getFileExtension(fileName);
+	const hasExportStreamApi = isExportStreamApiAvailable();
 	let streamError: unknown = null;
 
 	try {

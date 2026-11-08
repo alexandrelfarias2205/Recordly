@@ -8,74 +8,18 @@ import {
 	Output,
 	StreamTarget,
 } from "mediabunny";
+import {
+	EXPORT_STREAM_CHUNK_BYTES,
+	ExportStreamWriter,
+	isExportStreamApiAvailable,
+} from "./exportStreamIpc";
 import type { ExportConfig } from "./types";
-
-/**
- * Chunk boundary used by both the mediabunny StreamTarget and the IPC writer.
- * 16 MiB is well below Electron's IPC size limits and keeps per-chunk overhead
- * low — large enough that a 35-minute 1080p export only produces a few hundred
- * writes across the renderer/main boundary.
- */
-const EXPORT_STREAM_CHUNK_BYTES = 16 * 1024 * 1024;
-
-type IpcStreamSink = {
-	readonly streamId: string;
-	readonly tempPath: string;
-};
-
-async function openIpcExportStream(): Promise<IpcStreamSink> {
-	if (typeof window === "undefined" || !window.electronAPI?.openExportStream) {
-		throw new Error("openExportStream IPC is unavailable in this environment");
-	}
-	const result = await window.electronAPI.openExportStream({ extension: "mp4" });
-	if (!result.success || !result.streamId || !result.tempPath) {
-		throw new Error(result.error || "Failed to open export stream");
-	}
-	return { streamId: result.streamId, tempPath: result.tempPath };
-}
-
-async function writeIpcExportStream(
-	streamId: string,
-	position: number,
-	chunk: Uint8Array,
-): Promise<void> {
-	// Mediabunny owns the underlying buffer for the lifetime of the call, so we
-	// copy the bytes before crossing the IPC boundary — ipcRenderer.invoke uses
-	// a structured clone under the hood and the original buffer can be reused
-	// by the muxer immediately after await returns.
-	const copy = new Uint8Array(chunk.byteLength);
-	copy.set(chunk);
-	const result = await window.electronAPI!.writeExportStreamChunk(streamId, position, copy);
-	if (!result.success) {
-		throw new Error(result.error || "Failed to write export chunk");
-	}
-}
-
-async function closeIpcExportStream(
-	streamId: string,
-	options?: { abort?: boolean },
-): Promise<{ tempPath: string; bytesWritten: number }> {
-	const result = await window.electronAPI!.closeExportStream(streamId, options);
-	if (!result.success || !result.tempPath) {
-		throw new Error(result.error || "Failed to close export stream");
-	}
-	return { tempPath: result.tempPath, bytesWritten: result.bytesWritten ?? 0 };
-}
 
 export type MuxerTargetMode = "stream" | "buffer";
 
 export type MuxerFinalizeResult =
 	| { mode: "stream"; tempFilePath: string; bytesWritten: number }
 	| { mode: "buffer"; blob: Blob };
-
-function shouldUseStreamTarget(): boolean {
-	return (
-		typeof window !== "undefined" &&
-		typeof window.electronAPI?.openExportStream === "function" &&
-		typeof window.electronAPI?.writeExportStreamChunk === "function" &&
-		typeof window.electronAPI?.closeExportStream === "function"
-	);
-}
 
 export class VideoMuxer {
 	private output: Output | null = null;
@@ -85,12 +29,12 @@ export class VideoMuxer {
 	private target: MediabunnyTarget | null = null;
 	private config: ExportConfig;
 	private mode: MuxerTargetMode;
-	private streamSink: IpcStreamSink | null = null;
+	private streamWriter: ExportStreamWriter | null = null;
 
 	constructor(config: ExportConfig, hasAudio = false, mode?: MuxerTargetMode) {
 		this.config = config;
 		this.hasAudio = hasAudio;
-		this.mode = mode ?? (shouldUseStreamTarget() ? "stream" : "buffer");
+		this.mode = mode ?? (isExportStreamApiAvailable() ? "stream" : "buffer");
 	}
 
 	getTargetMode(): MuxerTargetMode {
@@ -99,9 +43,10 @@ export class VideoMuxer {
 
 	async initialize(): Promise<void> {
 		if (this.mode === "stream") {
-			const sink = await openIpcExportStream();
-			this.streamSink = sink;
-			const streamId = sink.streamId;
+			// Mediabunny reuses its buffer once write() resolves, so the writer copies first.
+			const writer = new ExportStreamWriter({ extension: "mp4", copyBeforeWrite: true });
+			await writer.open();
+			this.streamWriter = writer;
 			const writableStream = new WritableStream<{
 				type: "write";
 				data: Uint8Array;
@@ -111,7 +56,7 @@ export class VideoMuxer {
 					if (chunk.type !== "write") {
 						return;
 					}
-					await writeIpcExportStream(streamId, chunk.position, chunk.data);
+					await writer.write(chunk.position, chunk.data);
 				},
 			});
 			this.target = new StreamTarget(writableStream, {
@@ -168,15 +113,13 @@ export class VideoMuxer {
 		await this.output.finalize();
 
 		if (this.mode === "stream") {
-			const sink = this.streamSink;
-			if (!sink) {
+			const writer = this.streamWriter;
+			if (!writer?.isOpen) {
 				throw new Error("Stream target closed before finalization");
 			}
-			// Clear streamSink before awaiting close so a concurrent destroy()→
-			// abortStream() short-circuits on `!this.streamSink` instead of racing
-			// us for the same streamId.
-			this.streamSink = null;
-			const closeResult = await closeIpcExportStream(sink.streamId);
+			// The writer clears its stream id before awaiting close, so a concurrent
+			// destroy()→abortStream() short-circuits instead of racing us for the same stream.
+			const closeResult = await writer.close();
 			return {
 				mode: "stream",
 				tempFilePath: closeResult.tempPath,
@@ -192,17 +135,9 @@ export class VideoMuxer {
 	}
 
 	async abortStream(): Promise<void> {
-		if (this.mode !== "stream" || !this.streamSink) {
-			return;
-		}
-		try {
-			await closeIpcExportStream(this.streamSink.streamId, { abort: true });
-		} catch {
-			// Best-effort cleanup on cancel — the main process also reaps stale
-			// streams on before-quit via cleanupAllExportStreams.
-		} finally {
-			this.streamSink = null;
-		}
+		// Best-effort cleanup on cancel — the main process also reaps stale
+		// streams on before-quit via cleanupAllExportStreams.
+		await this.streamWriter?.abort();
 	}
 
 	destroy(): void {
@@ -210,7 +145,7 @@ export class VideoMuxer {
 		this.videoSource = null;
 		this.audioSource = null;
 		this.target = null;
-		if (this.streamSink) {
+		if (this.streamWriter?.isOpen) {
 			void this.abortStream();
 		}
 	}

@@ -27,7 +27,9 @@ import {
 	type TimelineSlice,
 	type TrimLikeRegion,
 } from "./audioProcessorShared";
+import { discardEditedAudioTemp, type EditedAudioSink } from "./editedAudioSink";
 import type { VideoMuxer } from "./muxer";
+import { createAudioBufferWindow, type PcmSource } from "./pcmSource";
 
 export class OfflineAudioProcessor extends AudioMediaProcessor {
 	protected async renderAndMuxOfflineAudio(
@@ -100,7 +102,7 @@ export class OfflineAudioProcessor extends AudioMediaProcessor {
 
 		// Decode companion / sidecar audio files
 		const companionEntries: Array<{
-			buffer: AudioBuffer;
+			buffer: PcmSource;
 			startDelaySec: number;
 			gain: number;
 		}> = [];
@@ -128,7 +130,7 @@ export class OfflineAudioProcessor extends AudioMediaProcessor {
 		if (this.cancelled) throw new Error("Export cancelled");
 
 		// Decode audio region overlay files
-		const regionEntries: Array<{ buffer: AudioBuffer; region: AudioRegion }> = [];
+		const regionEntries: Array<{ buffer: PcmSource; region: AudioRegion }> = [];
 		for (const region of audioRegions) {
 			if (this.cancelled) throw new Error("Export cancelled");
 			const buffer = await this.decodeAudioFromUrl(region.audioPath);
@@ -296,6 +298,76 @@ export class OfflineAudioProcessor extends AudioMediaProcessor {
 		return new Blob(pcmParts, { type: "audio/wav" });
 	}
 
+	// Render timeline to a WAV file on disk through `sink`, one chunk per write.
+	// Peak memory is one rendered chunk (~OFFLINE_CHUNK_DURATION_SEC) plus its 16-bit PCM,
+	// and nothing large crosses IPC at the end of the export.
+	protected async renderToWavStreamChunked(
+		prepared: PreparedOfflineRender,
+		sink: EditedAudioSink,
+	): Promise<{ tempPath: string; bytesWritten: number; mimeType: string }> {
+		const totalOutputSec = Math.max(prepared.outputDurationMs / 1000, 0.01);
+		const totalFrames = Math.ceil(totalOutputSec * OFFLINE_AUDIO_SAMPLE_RATE);
+		const numChannels = prepared.numChannels;
+		const headerBytes = 44;
+
+		await sink.open();
+		try {
+			await sink.write(
+				0,
+				new Uint8Array(
+					this.createWavHeader(OFFLINE_AUDIO_SAMPLE_RATE, numChannels, totalFrames),
+				),
+			);
+
+			let position = headerBytes;
+			let framesWritten = 0;
+			await this.renderChunked(prepared, totalOutputSec, async (rendered) => {
+				if (this.cancelled) throw new Error("Export cancelled");
+				const parts = this.audioBufferToPcmParts(rendered);
+				const bytes = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
+				let partOffset = 0;
+				for (const part of parts) {
+					bytes.set(new Uint8Array(part), partOffset);
+					partOffset += part.byteLength;
+				}
+				await sink.write(position, bytes);
+				position += bytes.byteLength;
+				framesWritten += rendered.length;
+			});
+			if (this.cancelled) throw new Error("Export cancelled");
+
+			// Chunk rounding can make the real frame count differ from the estimate.
+			if (framesWritten !== totalFrames) {
+				await sink.write(
+					0,
+					new Uint8Array(
+						this.createWavHeader(OFFLINE_AUDIO_SAMPLE_RATE, numChannels, framesWritten),
+					),
+				);
+			}
+
+			const closed = await sink.close();
+			if (this.cancelled) {
+				await discardEditedAudioTemp(closed.tempPath);
+				throw new Error("Export cancelled");
+			}
+
+			// A truncated file or one with holes must never become an "OK" export.
+			const expectedBytes = headerBytes + framesWritten * numChannels * 2;
+			if (closed.bytesWritten !== expectedBytes) {
+				await discardEditedAudioTemp(closed.tempPath);
+				throw new Error(
+					`Edited audio file is incomplete (${closed.bytesWritten} of ${expectedBytes} bytes written)`,
+				);
+			}
+			return { ...closed, mimeType: "audio/wav" };
+		} catch (error) {
+			await sink.abort();
+			if (this.cancelled) throw new Error("Export cancelled");
+			throw error;
+		}
+	}
+
 	// Shared chunked rendering loop. Processes the timeline in
 	// OFFLINE_CHUNK_DURATION_SEC segments, calling onChunk for each rendered buffer.
 	protected async renderChunked(
@@ -376,7 +448,7 @@ export class OfflineAudioProcessor extends AudioMediaProcessor {
 	// Schedule an audio region overlay clipped to a specific chunk window.
 	protected scheduleRegionForChunk(
 		ctx: OfflineAudioContext,
-		buffer: AudioBuffer,
+		buffer: PcmSource,
 		region: AudioRegion,
 		slices: TimelineSlice[],
 		chunkOutputStartSec: number,
@@ -414,10 +486,16 @@ export class OfflineAudioProcessor extends AudioMediaProcessor {
 		gainNode.gain.value = Math.max(0, Math.min(1, region.volume * normalizeGain));
 		gainNode.connect(ctx.destination);
 
+		// Only the audible window is materialized as an AudioBuffer (the source may be chunked).
 		const source = ctx.createBufferSource();
-		source.buffer = buffer;
+		source.buffer = createAudioBufferWindow(
+			ctx,
+			buffer,
+			bufferOffsetSec * buffer.sampleRate,
+			duration * buffer.sampleRate + 1,
+		);
 		source.connect(gainNode);
-		source.start(localStartSec, bufferOffsetSec, duration);
+		source.start(localStartSec, 0, duration);
 	}
 
 	// Feed a rendered AudioBuffer chunk to an AudioEncoder with a timestamp offset.

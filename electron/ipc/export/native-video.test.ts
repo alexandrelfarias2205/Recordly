@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("electron", () => ({
@@ -33,6 +34,7 @@ const fsMocks = vi.hoisted(() => ({
 	readFile: vi.fn(),
 	stat: vi.fn(async () => ({ size: 5_000_000_000 })),
 	unlink: vi.fn(async () => undefined),
+	rm: vi.fn(async () => undefined),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -53,6 +55,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 import { app } from "electron";
+import { isOwnedExportPath, registerOwnedExportPath, releaseOwnedExportPath } from "./exportStream";
 import {
 	buildExperimentalNvidiaCudaStaticLayoutArgs,
 	buildExperimentalWindowsGpuStaticLayoutArgs,
@@ -71,6 +74,7 @@ import {
 	hasNvidiaGpuDeviceInGpuInfo,
 	mapNvidiaCudaWrapperProgressPercentage,
 	muxExportedVideoAudioBuffer,
+	muxNativeVideoExportAudio,
 	type NativeStaticLayoutExportOptions,
 	normalizeNativeStaticLayoutBackground,
 	parseFfmpegDurationSeconds,
@@ -915,6 +919,56 @@ describe("muxExportedVideoAudioBuffer", () => {
 		const result = await muxExportedVideoAudioBuffer(videoData, { audioMode: "none" });
 
 		expect(result.outputPath).toMatch(/recordly-export-video-/);
+	});
+});
+
+describe("muxNativeVideoExportAudio edited-track input", () => {
+	const editedTrackOptions = {
+		audioMode: "edited-track" as const,
+		editedAudioMimeType: "audio/wav",
+	};
+
+	it("uses an owned editedAudioPath directly and removes it afterwards", async () => {
+		const audioPath = path.join(process.cwd(), "recordly-export-stream-test-audio.wav");
+		registerOwnedExportPath(audioPath);
+		fsMocks.writeFile.mockClear();
+		fsMocks.rm.mockClear();
+		execFileMock.mockClear();
+		fsMocks.stat.mockResolvedValueOnce({ size: 790_000_000 });
+
+		const result = await muxNativeVideoExportAudio("/tmp/video.mp4", {
+			...editedTrackOptions,
+			editedAudioPath: audioPath,
+		});
+
+		const ffmpegArgs = execFileMock.mock.calls[0][1] as string[];
+		expect(ffmpegArgs).toContain(audioPath);
+		expect(fsMocks.writeFile).not.toHaveBeenCalled();
+		expect(result.metrics.tempEditedAudioBytes).toBe(790_000_000);
+		expect(fsMocks.rm).toHaveBeenCalledWith(audioPath, { force: true });
+		expect(isOwnedExportPath(audioPath)).toBe(false);
+	});
+
+	it("rejects an editedAudioPath that is not an app-managed export temp", async () => {
+		const audioPath = path.join(process.cwd(), "not-owned-audio.wav");
+		releaseOwnedExportPath(audioPath);
+		fsMocks.writeFile.mockClear();
+		fsMocks.rm.mockClear();
+
+		await expect(
+			muxNativeVideoExportAudio("/tmp/video.mp4", {
+				...editedTrackOptions,
+				editedAudioPath: audioPath,
+			}),
+		).rejects.toThrow("Edited audio path is not an app-managed export temp");
+		expect(fsMocks.writeFile).not.toHaveBeenCalled();
+		expect(fsMocks.rm).not.toHaveBeenCalledWith(audioPath, expect.anything());
+	});
+
+	it("fails when neither editedAudioPath nor editedAudioData is provided", async () => {
+		await expect(
+			muxNativeVideoExportAudio("/tmp/video.mp4", editedTrackOptions),
+		).rejects.toThrow("Edited audio data is missing for native export");
 	});
 });
 

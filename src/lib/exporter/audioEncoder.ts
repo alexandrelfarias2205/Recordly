@@ -1,4 +1,5 @@
 import type { WebDemuxer } from "web-demuxer";
+import { AudioDecodeCancelledError } from "@/lib/audio/streamAudioDecode";
 import { requiresClipTimelineRendering } from "./clipTimeline";
 import type {
 	AudioRegion,
@@ -14,6 +15,7 @@ import {
 	MP4_AUDIO_CODEC,
 	type TrimLikeRegion,
 } from "./audioProcessorShared";
+import { ExportStreamWriter, isExportStreamApiAvailable } from "./exportStreamIpc";
 import type { VideoMuxer } from "./muxer";
 
 export {
@@ -22,6 +24,10 @@ export {
 	isAacAudioEncodingSupported,
 	softLimitOfflineMixPeaksInPlace,
 } from "./audioProcessorShared";
+
+// Longest output (10 min, ~110 MB of 16-bit stereo WAV) for which a failed disk stream may
+// fall back to the in-memory Blob path; longer outputs would reintroduce the renderer OOM.
+const BLOB_FALLBACK_MAX_OUTPUT_MS = 10 * 60 * 1000;
 
 export class AudioProcessor extends AudioTranscodeProcessor {
 	private isPassthroughAudioCodec(codec: string | undefined): boolean {
@@ -238,7 +244,7 @@ export class AudioProcessor extends AudioTranscodeProcessor {
 		await this.processTrimOnlyAudio(demuxer, muxer, sortedTrims, readEndSec);
 	}
 
-	async renderEditedAudioTrack(
+	private async prepareEditedAudioRender(
 		videoUrl: string,
 		trimRegions?: TrimLikeRegion[],
 		speedRegions?: SpeedRegion[],
@@ -247,7 +253,7 @@ export class AudioProcessor extends AudioTranscodeProcessor {
 		sourceAudioFallbackStartDelayMsByPath?: Record<string, number>,
 		sourceAudioTrackSettings?: SourceAudioTrackSettings,
 		clipRegions?: ClipRegion[],
-	): Promise<Blob> {
+	) {
 		const sortedTrims = trimRegions
 			? [...trimRegions].sort((a, b) => a.startMs - b.startMs)
 			: [];
@@ -265,7 +271,7 @@ export class AudioProcessor extends AudioTranscodeProcessor {
 				)
 			: [];
 
-		const prepared = await this.prepareOfflineRender(
+		return this.prepareOfflineRender(
 			videoUrl,
 			sortedTrims,
 			sortedSpeedRegions,
@@ -275,7 +281,45 @@ export class AudioProcessor extends AudioTranscodeProcessor {
 			sourceAudioTrackSettings,
 			clipRegions,
 		);
+	}
+
+	// In-memory variant: kept for environments without the export-stream IPC.
+	async renderEditedAudioTrack(
+		...args: Parameters<AudioProcessor["prepareEditedAudioRender"]>
+	): Promise<Blob> {
+		const prepared = await this.prepareEditedAudioRender(...args);
 		return this.renderToWavBlobChunked(prepared);
+	}
+
+	// Streams the edited WAV to a main-process temp file. Resolves to null when the
+	// export-stream IPC is unavailable so the caller can fall back to the Blob path.
+	async renderEditedAudioTrackToTempFile(
+		...args: Parameters<AudioProcessor["prepareEditedAudioRender"]>
+	): Promise<{ tempPath: string; mimeType: string; bytesWritten: number } | null> {
+		if (!isExportStreamApiAvailable()) {
+			return null;
+		}
+		const prepared = await this.prepareEditedAudioRender(...args);
+		try {
+			return await this.renderToWavStreamChunked(
+				prepared,
+				new ExportStreamWriter({ extension: "wav", label: "edited audio" }),
+			);
+		} catch (error) {
+			const cancelled =
+				this.cancelled ||
+				error instanceof AudioDecodeCancelledError ||
+				(error instanceof Error && error.message === "Export cancelled");
+			// Short timelines are small enough that the in-memory Blob path is safe.
+			if (cancelled || prepared.outputDurationMs > BLOB_FALLBACK_MAX_OUTPUT_MS) {
+				throw error;
+			}
+			console.warn(
+				"[AudioProcessor] Streaming edited audio to disk failed, falling back to Blob:",
+				error,
+			);
+			return null;
+		}
 	}
 
 	// Legacy trim-only path used when no speed regions are configured.
