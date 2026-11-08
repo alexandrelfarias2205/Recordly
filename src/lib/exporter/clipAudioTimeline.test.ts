@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { AudioRegion } from "@/components/video-editor/types";
 import { OfflineAudioProcessor } from "./offlineAudioProcessor";
 
-const buffer = { duration: 12, numberOfChannels: 2 } as AudioBuffer;
+const buffer = {
+	duration: 12,
+	numberOfChannels: 2,
+	sampleRate: 48_000,
+	length: 12 * 48_000,
+	copyFromChannel: vi.fn(),
+} as unknown as AudioBuffer;
 class TestAudioProcessor extends OfflineAudioProcessor {
 	prepare = this.prepareOfflineRender.bind(this);
 	schedule = this.scheduleBufferThroughTimeline.bind(this);
@@ -24,6 +30,13 @@ function context() {
 		starts,
 		ctx: {
 			destination: {},
+			createBuffer: (channels: number, length: number, sampleRate: number) => ({
+				numberOfChannels: channels,
+				length,
+				sampleRate,
+				duration: length / sampleRate,
+				getChannelData: () => new Float32Array(length),
+			}),
 			createGain: () => ({ gain: { value: 1 }, connect: vi.fn() }),
 			createBufferSource: () => {
 				const start = vi.fn();

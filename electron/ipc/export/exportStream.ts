@@ -119,6 +119,10 @@ export async function writeToExportStream(
 		// fileHandle.write may be short (e.g. disk full); loop until everything lands.
 		let written = 0;
 		try {
+			// A negative position would silently write at the current file offset.
+			if (!Number.isSafeInteger(position) || position < 0) {
+				throw new Error(`Invalid export stream write position: ${position}`);
+			}
 			while (written < buffer.byteLength) {
 				const result = await session.fileHandle.write(
 					buffer,

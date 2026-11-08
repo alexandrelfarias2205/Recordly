@@ -75,7 +75,7 @@ describe("modern export audio cancellation", () => {
 				closeExportStream: vi.fn(async () => ({
 					success: true,
 					tempPath: "/tmp/edited.wav",
-					bytesWritten: 48,
+					bytesWritten: 44 + 48_000 * 2,
 				})),
 				discardExportedTemp: discard,
 				muxExportedVideoAudioFromPath: mux,
